@@ -1,12 +1,20 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
- FaceGuard 酱 —— 二次元风护眼距离提醒小工具（单文件版）
+ FaceGuard 酱 · 鲸鱼娘 —— 二次元风护眼距离提醒小工具（单文件版 v2.0）
 ================================================================================
  【功能一句话】
    读取本机摄像头 → 本地人脸检测（OpenCV Haar 级联）→ 实时跟踪"人脸占画面比例"。
    当人脸持续变大（= 头不断向屏幕凑近）超过设定阈值、且连续多帧确认后，触发提醒：
-   二次元弹窗 + 可选屏幕角落悬浮字幕 + 可选提示音。冷却时间内不会重复报警。
+   鲸鱼娘二次元弹窗 + 可选屏幕右上角悬浮字幕 + 可选提示音。冷却时间内不会重复报警。
+
+ 【v2.0 蓝鲸版新增】
+   * 主题换肤：整个软件背景改成深海蓝渐变（海面蓝 → 深海黑蓝），所有控件
+     （面板 / 滑块 / 按钮 / 进度条 / 滚轮 / 弹窗）统一蓝调，彻底告别原来的粉色；
+   * 鲸鱼娘元素：纯 Canvas 图元矢量绘制的鲸鱼娘（鲸鱼兜帽 + 尾鳍 + 喷水 + 腮红），
+     出现在标题栏、摄像头待机画面、报警弹窗、悬浮字幕与悬浮球上，零图片素材；
+   * 悬浮球：主窗口最小化后自动出现在桌面右下角，球体颜色随"距离水平"由蓝渐变到红
+     （蓝 = 离得远，红 = 贴脸），并支持拖动、悬停看数值、双击回主窗口、右键菜单。
 
  【隐私承诺（硬性要求）】
    * 全程离线：代码中没有任何网络请求，运行时绝不联网下载模型/上传数据；
@@ -17,16 +25,18 @@
    * GUI      : Tkinter —— Python 标准库，零额外依赖，PyInstaller 打包体积最小；
    * 人脸检测 : OpenCV 自带 Haar 级联 —— 比 MTCNN 轻量几个数量级（模型 <1MB），
                 CPU 单线程即可 30FPS 实时，且 XML 直接内置在 opencv 包里可随包打包；
-   * 显示辅助 : Pillow —— 仅用于把 OpenCV 帧高效刷到 Tkinter 画布（不走 PNG 编码）。
+   * 显示辅助 : Pillow —— 仅用于把 OpenCV 帧高效刷到 Tkinter 画布（不走 PNG 编码）；
+   * 美术素材 : 全部用 Canvas 图元现画，零外部图片、打包体积零增长。
 
  【运行】   python face_guard.py
- 【打包】   双击 build.bat（或看 README.md 中的完整命令与注意事项）
+ 【打包】   双击 build.bat（或 python -m PyInstaller --noconfirm --clean FaceGuard.spec）
 ================================================================================
 """
 
 import os
 import sys
 import time
+import colorsys
 import queue
 import random
 import platform
@@ -53,45 +63,73 @@ if IS_WINDOWS:
         winsound = None
 
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, messagebox
 
 # ================================ 常量与文案 ================================
 
-APP_NAME = "FaceGuard 酱"
-APP_VERSION = "v1.0"
+APP_NAME = "FaceGuard 酱 · 鲸鱼娘"
+APP_VERSION = "v2.0"
 
 # 内置人脸检测模型文件名（打包时用 --add-data 塞进 EXE，见 build.bat）
 CASCADE_FILENAME = "haarcascade_frontalface_default.xml"
 
+# ---------------- 蓝鲸主题配色（整个软件的背景/控件都从这里取色） ----------------
+BG_DEEP    = "#04121f"   # 窗口最底色 / 渐变末端（深海）
+GRAD_TOP   = "#0b3d6b"   # 背景渐变顶部（海面蓝）
+GRAD_BOT   = "#04121f"   # 背景渐变底部（深海）
+PANEL      = "#0a2647"   # 卡片 / 面板底色
+PANEL_2    = "#0d3157"   # 次级面板 / 输入框底色
+LINE       = "#1b4f7f"   # 描边
+TXT        = "#dceeff"   # 主文字
+TXT_DIM    = "#7fa8cc"   # 次要文字
+ACCENT     = "#2b8fe0"   # 主强调色（鲸蓝）
+ACCENT_DK  = "#1c7fd6"   # 强调色按下态
+ACCENT_LT  = "#8fdcff"   # 强调色亮部（标题/数值）
+OK_C       = "#4fd6a0"   # 距离正常
+WARN_C     = "#ffc93c"   # 偏近 / 冷却
+ALERT_C    = "#ff5a5a"   # 报警
+
+WHALE_BLUE = "#2f8fff"   # 鲸鱼娘身体主色
+WHALE_DEEP = "#1d6fd0"   # 兜帽深色
+SKIN       = "#ffe3cc"   # 脸
+BLUSH      = "#ff9db1"   # 腮红
+
+KEY_COLOR  = "#0b0c0d"   # 透明色键：让圆角悬浮窗/悬浮球四角透出桌面（仅 Windows 有效）
+
 # 弹窗文案：(大字颜文字, 正文)。每次报警随机抽一条，避免视觉疲劳
 POPUP_TEXTS = [
-    ("(＞﹏＜) 距离太近啦！",
-     "脸都要贴到屏幕上了说！\n对眼睛和颈椎都很不友好的喵～\n建议保持 50~70cm 的距离哦 (๑•̀ㅂ•́)و✧"),
-    ("(╬ Ò﹏Ó) 护眼结界触发！",
-     "检测到程序员正在向屏幕坠落……\n快退后！代码又不会跑掉啦！(ﾉ≧∀≦)ﾉ"),
-    ("(｡•́︿•̀｡) 有点太近了喵……",
-     "屏幕距离过近会加重视疲劳哦～\n去接杯水休息 20 秒，回来继续肝！(๑•̀ㅁ•́๑)✧"),
-    ("(ﾟДﾟ≡ﾟДﾟ) 警告！警告！",
-     "人脸尺寸超标！已进入【贴脸码字】状态～\n退后一步，海阔天空 (っ•̀ω•́)っ✨"),
+    ("(っ˘ω˘ς) 脸都要贴到我尾巴上啦！",
+     "鲸鱼娘提醒：你和屏幕的距离已经太近啦～\n"
+     "建议保持 50~70cm，退后一点点，眼睛会谢谢你的！"),
+    ("(๑•̀ㅂ•́)و✧ 喷水警告！",
+     "检测到有人正在向屏幕俯冲……\n"
+     "鲸鱼娘已经喷水阻止了！\n抬头、挺胸、远离屏幕～"),
+    ("(；・∀・) 太近了太近了！",
+     "近距离 + 长时间盯屏 = 眼睛加班。\n"
+     "去接杯水，闭眼休息 20 秒再回来吧～"),
+    ("(๑˃ᴗ˂)ﻭ 护眼海域提醒",
+     "你已进入『贴脸码字』海域！\n"
+     "请退到 50~70cm 的安全距离，鲸鱼娘就放心了～"),
 ]
 
 # 屏幕角落悬浮字幕（短句）
 FLOAT_TEXTS = [
-    "太近啦！(＞﹏＜)",
-    "退后一点嘛～(´･ω･`)",
-    "护眼提醒：离屏幕远一点！",
-    "贴脸警告 (╬ Ò﹏Ó)",
-    "眼睛：救命！(；´д｀)",
+    "太近啦！(っ˘ω˘ς)",
+    "鲸鱼娘：退后一点嘛～",
+    "喷水警告！离屏幕远一点！",
+    "贴脸啦，眼睛要抗议了 (；・∀・)",
+    "护眼海域：请保持距离～",
 ]
 
 # 状态栏文案：(文字, 颜色)
 STATE_TEXT = {
-    "noface":   ("画面里没有人脸……人呢？(・_・;)", "#868e96"),
-    "far":      ("脸有点远呀，检测不到稳定人脸 (´･ω･`)", "#868e96"),
-    "normal":   ("距离正常，继续加油写代码！(๑•̀ㅂ•́)و✧", "#2f9e44"),
-    "near":     ("有点近了哦……再近就要报警啦 (￣^￣)", "#f59f00"),
-    "cooldown": ("冷却中……刚刚提醒过啦，快退后呀 (´･ω･`)", "#f59f00"),
-    "alert":    ("太近啦！！(╬ Ò﹏Ó)", "#e03131"),
+    "noface":   ("咦，鲸鱼娘没看到你的脸……(っ˘ω˘ς)", TXT_DIM),
+    "far":      ("离得有点远呢，靠近一点点让我看看你～", TXT_DIM),
+    "normal":   ("距离刚刚好，鲸鱼娘很满意！(๑˃ᴗ˂)ﻭ", OK_C),
+    "near":     ("有点近了哦……鲸鱼娘开始紧张了 (；・∀・)", WARN_C),
+    "cooldown": ("冷却中……刚提醒过啦，快退后呀 (っ˘ω˘ς)", WARN_C),
+    "alert":    ("太近啦！！鲸鱼娘喷水警告！(๑•̀ㅂ•́)و✧", ALERT_C),
 }
 
 # 字体（Windows 用微软雅黑，其它系统自动回退到默认字体）
@@ -100,7 +138,8 @@ FONT_UI    = (_FONT, 10)
 FONT_SMALL = (_FONT, 9)
 FONT_BTN   = (_FONT, 11, "bold")
 FONT_TITLE = (_FONT, 16, "bold")
-FONT_POP   = (_FONT, 22, "bold")
+FONT_POP   = (_FONT, 15, "bold")
+FONT_TINY  = (_FONT, 9, "bold")
 
 
 # ================================ 工具函数 ================================
@@ -146,6 +185,167 @@ def find_cascade_path():
     if os.path.exists(cand):
         return cand
     return None
+
+
+# ---------------- 颜色工具（"蓝 → 红"悬浮球渐变 + 全部美术绘制都靠它们） ----------------
+
+def hex_to_rgb(color):
+    """'#rrggbb' → (r, g, b)。"""
+    c = color.lstrip("#")
+    return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+
+
+def rgb_to_hex(rgb):
+    """(r, g, b) → '#rrggbb'，自动夹到 0~255。"""
+    r, g, b = (max(0, min(255, int(round(v)))) for v in rgb)
+    return "#%02x%02x%02x" % (r, g, b)
+
+
+def shade(color, factor):
+    """把颜色整体调亮（factor>1）或调暗（factor<1），用于画高光与阴影。
+    Tkinter 不支持透明度，深浅色是唯一的立体感来源。"""
+    r, g, b = hex_to_rgb(color)
+    return rgb_to_hex((r * factor, g * factor, b * factor))
+
+
+def distance_color(ratio):
+    """『距离水平』→ 悬浮球颜色：0 = 离得远（蓝）→ 1 = 贴脸（红）。
+
+    用 HSV 色相插值（210°蓝 → 0°红），中途经过青 / 绿 / 黄 / 橙，
+    比 RGB 直接做蓝红线性插值干净得多（后者中途会发灰发紫，很难看）。
+    """
+    r = max(0.0, min(1.0, float(ratio)))
+    hue = (210.0 * (1.0 - r)) / 360.0
+    rr, gg, bb = colorsys.hsv_to_rgb(hue, 0.82, 1.0)
+    return rgb_to_hex((rr * 255, gg * 255, bb * 255))
+
+
+def try_transparent(win):
+    """把 KEY_COLOR 设为全透明（Windows layered window 色键），
+    让圆角悬浮窗 / 悬浮球的四个角真正透出桌面。
+    非 Windows 或 Tk 不支持时静默返回 False，调用方改用同色背景兜底。"""
+    if not IS_WINDOWS:
+        return False
+    try:
+        win.attributes("-transparentcolor", KEY_COLOR)
+        return True
+    except Exception:
+        return False
+
+
+def paint_gradient(canvas, width, height, top, bottom, tag="grad"):
+    """在 Canvas 上画竖向线性渐变。
+
+    Tkinter 没有渐变控件，这里用逐像素细线堆出来 —— 只在窗口尺寸变化时重画一次，
+    成本可以忽略（几百次 create_line）。
+    """
+    canvas.delete(tag)
+    width, height = int(width), int(height)
+    if width <= 1 or height <= 1:
+        return
+    r1, g1, b1 = hex_to_rgb(top)
+    r2, g2, b2 = hex_to_rgb(bottom)
+    for i in range(height):
+        t = i / float(max(1, height - 1))
+        canvas.create_line(0, i, width, i, tags=tag,
+                           fill=rgb_to_hex((r1 + (r2 - r1) * t,
+                                            g1 + (g2 - g1) * t,
+                                            b1 + (b2 - b1) * t)))
+    canvas.tag_lower(tag)
+
+
+def round_rect(canvas, x1, y1, x2, y2, radius, **kw):
+    """圆角矩形（用平滑多边形近似）。Tkinter 没有圆角控件，悬浮字幕靠它。"""
+    pts = [x1 + radius, y1, x2 - radius, y1, x2, y1, x2, y1 + radius,
+           x2, y2 - radius, x2, y2, x2 - radius, y2, x1 + radius, y2,
+           x1, y2, x1, y2 - radius, x1, y1 + radius, x1, y1]
+    return canvas.create_polygon(pts, smooth=True, **kw)
+
+
+def draw_whale_girl(canvas, cx, cy, size, mood="normal",
+                    body=WHALE_BLUE, hood=WHALE_DEEP, skin=SKIN, tag=None):
+    """在 Canvas 上矢量绘制『鲸鱼娘』：鲸鱼兜帽 + 尾鳍 + 喷水 + 脸蛋 + 腮红。
+
+    纯图元绘制，不依赖任何图片素材，所以打包体积零增长，而且能被多处复用 ——
+    悬浮球只要把 body/hood 换成"随距离变化"的颜色，就得到了会变色的鲸鱼娘。
+
+    cx, cy : 中心点；size : 直径；mood : normal / near / alert（决定表情）。
+    返回本次创建的 item id 列表。
+    """
+    r = size / 2.0
+    tags = () if tag is None else (tag,)
+    items = []
+
+    def oval(x1, y1, x2, y2, **kw):
+        items.append(canvas.create_oval(cx + x1 * r, cy + y1 * r,
+                                        cx + x2 * r, cy + y2 * r, tags=tags, **kw))
+
+    def poly(pts, **kw):
+        flat = []
+        for px, py in pts:
+            flat += [cx + px * r, cy + py * r]
+        items.append(canvas.create_polygon(flat, smooth=True, tags=tags, **kw))
+
+    def line(pts, **kw):
+        flat = []
+        for px, py in pts:
+            flat += [cx + px * r, cy + py * r]
+        items.append(canvas.create_line(flat, tags=tags, **kw))
+
+    # ---- 1) 头顶喷水（鲸鱼的标志）----
+    for (dx, dy, rr) in ((-0.30, -1.62, 0.15), (0.0, -1.88, 0.12), (0.30, -1.58, 0.14)):
+        oval(dx - rr, dy - rr * 1.4, dx + rr, dy + rr * 1.4, fill="#cdefff", outline="")
+
+    # ---- 2) 两侧尾鳍（先画，垫在头后面）----
+    poly([(0.0, -0.50), (-0.92, -1.20), (-0.96, -1.52), (-0.16, -0.84)],
+         fill=shade(body, 0.86), outline=shade(body, 1.25))
+    poly([(0.0, -0.50), (0.92, -1.20), (0.96, -1.52), (0.16, -0.84)],
+         fill=shade(body, 0.86), outline=shade(body, 1.25))
+
+    # ---- 3) 头（鲸鱼兜帽）----
+    oval(-1.0, -0.90, 1.0, 0.92, fill=body, outline=shade(body, 1.3), width=2)
+    items.append(canvas.create_arc(cx - r, cy - r * 1.02, cx + r, cy + r * 0.86,
+                                   start=0, extent=180, style="chord",
+                                   fill=hood, outline=shade(hood, 1.35),
+                                   width=2, tags=tags))
+    items.append(canvas.create_arc(cx - r * 0.98, cy - r * 1.0, cx + r * 0.98, cy + r * 0.84,
+                                   start=180, extent=180, style="arc",
+                                   outline=ACCENT_LT, width=2, tags=tags))
+
+    # ---- 4) 脸 ----
+    oval(-0.64, -0.34, 0.64, 0.70, fill=skin, outline=shade(skin, 0.82))
+
+    # ---- 5) 眼睛（三种情绪）----
+    eye = "#16324f"
+    if mood == "alert":
+        line([(-0.46, -0.02), (-0.20, 0.16), (-0.46, 0.34)], fill=eye, width=3)   # >_<
+        line([(0.46, -0.02), (0.20, 0.16), (0.46, 0.34)], fill=eye, width=3)
+    elif mood == "near":
+        for x1, x2 in ((-0.46, -0.16), (0.16, 0.46)):                             # ∩ ∩ 眯眼
+            items.append(canvas.create_arc(cx + x1 * r, cy - r * 0.04,
+                                           cx + x2 * r, cy + r * 0.34,
+                                           start=0, extent=180, style="arc",
+                                           outline=eye, width=3, tags=tags))
+    else:
+        oval(-0.44, -0.06, -0.18, 0.32, fill=eye, outline="")
+        oval(0.18, -0.06, 0.44, 0.32, fill=eye, outline="")
+        oval(-0.39, 0.00, -0.28, 0.11, fill="#ffffff", outline="")                # 高光
+        oval(0.23, 0.00, 0.34, 0.11, fill="#ffffff", outline="")
+        oval(-0.25, 0.20, -0.19, 0.26, fill="#ffffff", outline="")
+        oval(0.37, 0.20, 0.43, 0.26, fill="#ffffff", outline="")
+
+    # ---- 6) 腮红 ----
+    oval(-0.90, 0.16, -0.56, 0.42, fill=BLUSH, outline="")
+    oval(0.56, 0.16, 0.90, 0.42, fill=BLUSH, outline="")
+
+    # ---- 7) 嘴 ----
+    if mood == "alert":
+        oval(-0.16, 0.30, 0.16, 0.62, fill="#8c3b4a", outline="")
+    else:
+        items.append(canvas.create_arc(cx - r * 0.24, cy + r * 0.26, cx + r * 0.24, cy + r * 0.60,
+                                       start=200, extent=140, style="arc",
+                                       outline="#a8543f", width=2, tags=tags))
+    return items
 
 
 # ================================ 靠近判定引擎 ================================
@@ -225,7 +425,7 @@ class CameraWorker(threading.Thread):
 
     为什么单独开线程：cv2.VideoCapture.read() 和 Haar 检测都是阻塞操作，
     放主线程会卡死 Tkinter 界面；分开后即使主窗口最小化，检测也在后台继续跑，
-    报警弹窗照常弹出（满足"最小化后继续检测"）。
+    报警弹窗与悬浮球照常更新（满足"最小化后继续检测"）。
     """
 
     DETECT_WIDTH   = 320    # 检测前把画面宽度缩到 320px：Haar 耗时近似正比于像素数，
@@ -296,10 +496,11 @@ class CameraWorker(threading.Thread):
 
     @staticmethod
     def _annotate(frame, x, y, w, h, size_pct, state):
-        """在帧上画人脸框。注意：cv2.putText 不支持中文，
-        所以画面叠加文字只用 ASCII，中文都放在 Tkinter 控件里显示。"""
-        color = (80, 80, 255) if state == "alert" else \
-                (80, 170, 255) if state in ("near", "cooldown") else (120, 220, 120)
+        """在帧上画人脸框（BGR 配色，与界面的蓝→红主题保持一致）。
+        注意：cv2.putText 不支持中文，所以画面叠加文字只用 ASCII，
+        中文都放在 Tkinter 控件里显示。"""
+        color = (90, 90, 255) if state == "alert" else \
+                (60, 200, 255) if state in ("near", "cooldown") else (255, 190, 80)
         cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
         cv2.putText(frame, "face %.0f%%" % (size_pct * 100),
                     (x, max(18, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
@@ -408,14 +609,15 @@ class CameraWorker(threading.Thread):
 
 class FaceGuardApp:
 
-    CANVAS_W, CANVAS_H = 600, 450   # 摄像头画面显示区域
+    CANVAS_W, CANVAS_H = 560, 400   # 摄像头画面显示区域
     TICK_MS = 33                    # UI 刷新周期 ≈ 30FPS
+    BALL_SIZE = 92                  # 悬浮球直径
 
     def __init__(self, root):
         self.root = root
         root.title("%s · 护眼距离提醒 %s ｜ 全程离线 · 画面不上传" % (APP_NAME, APP_VERSION))
-        root.configure(bg="#fff5f8")
-        root.minsize(680, 800)
+        root.configure(bg=BG_DEEP)
+        root.minsize(640, 720)
 
         # ---- 线程间共享数据 ----
         self.shared = {"lock": threading.Lock(), "frame": None, "metrics": {}}
@@ -434,11 +636,23 @@ class FaceGuardApp:
         self._float_after = None
         self._photo = None
         self._img_item = None
-        self._ph_item = None
+
+        # ---- 悬浮球状态（最小化时显示，颜色随距离由蓝到红）----
+        self._ball = None
+        self._ball_canvas = None
+        self._ball_key = None          # (量化后的贴近度, 状态)：变了才重画
+        self._ball_pos = None          # 记忆拖动后的位置
+        self._ball_drag = None         # 拖动时的鼠标偏移
+        self._ball_tip = None
+        self._ball_tip_lbl = None
+
+        # ---- 背景渐变画布 ----
+        self._bg_size = (0, 0)
 
         self._build_ui()
         self._ui_ready = True
         self._sync_params()
+        self._fit_to_screen()
 
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         root.after(self.TICK_MS, self._tick)
@@ -447,59 +661,106 @@ class FaceGuardApp:
 
     def _build_ui(self):
         R = self.root
-        BG = "#fff5f8"
 
-        # 标题栏
-        head = tk.Frame(R, bg=BG)
-        head.pack(fill="x", padx=14, pady=(10, 2))
-        tk.Label(head, text="FaceGuard 酱", font=FONT_TITLE, bg=BG, fg="#e64980").pack(side="left")
-        tk.Label(head, text="  二次元护眼距离小卫士 · 离线运行 · 画面绝不离开你的电脑",
-                 font=FONT_SMALL, bg=BG, fg="#868e96").pack(side="left", pady=(6, 0))
+        # === 背景：整窗深海蓝渐变 + 泡泡 + 鲸鱼剪影（先创建 = 垫在最底层）===
+        self.bg_canvas = tk.Canvas(R, bg=BG_DEEP, highlightthickness=0, bd=0)
+        self.bg_canvas.place(x=0, y=0, relwidth=1, relheight=1)
+        self.bg_canvas.bind("<Configure>", self._on_bg_resize)
 
-        # 摄像头画面
-        self.canvas = tk.Canvas(R, width=self.CANVAS_W, height=self.CANVAS_H,
-                                bg="#3b3a4a", highlightthickness=1,
-                                highlightbackground="#ffd9e4")
-        self.canvas.pack(padx=14, pady=6)
-        self._ph_item = self.canvas.create_text(
-            self.CANVAS_W // 2, self.CANVAS_H // 2,
-            text="摄像头未启动\n点击下方【▶ 启动摄像头】开始守护你的眼睛 (ฅ'ω'ฅ)",
-            fill="#b8b5c4", font=FONT_UI, justify="center")
+        # === 卡片 1：标题栏（鲸鱼娘头像 + 标题）===
+        head = tk.Frame(R, bg=PANEL, highlightthickness=1, highlightbackground=LINE)
+        head.pack(fill="x", padx=18, pady=(14, 6))
+        icon = tk.Canvas(head, width=58, height=58, bg=PANEL, highlightthickness=0, bd=0)
+        icon.pack(side="left", padx=(10, 6), pady=5)
+        draw_whale_girl(icon, 29, 32, 42, mood="normal")
+        tbox = tk.Frame(head, bg=PANEL)
+        tbox.pack(side="left", pady=5)
+        tk.Label(tbox, text="FaceGuard 酱 · 鲸鱼娘", font=FONT_TITLE,
+                 bg=PANEL, fg=ACCENT_LT).pack(anchor="w")
+        tk.Label(tbox, text="二次元护眼距离小卫士 · 离线运行 · 画面绝不离开你的电脑",
+                 font=FONT_SMALL, bg=PANEL, fg=TXT_DIM).pack(anchor="w", pady=(3, 0))
 
-        # 状态栏 + 靠近程度进度条
+        # === 卡片 2：摄像头画面（待机时显示鲸鱼娘）===
+        cam_card = tk.Frame(R, bg=PANEL, highlightthickness=1, highlightbackground=LINE)
+        cam_card.pack(padx=18, pady=2)
+        self.canvas = tk.Canvas(cam_card, width=self.CANVAS_W, height=self.CANVAS_H,
+                                bg="#062036", highlightthickness=0, bd=0)
+        self.canvas.pack(padx=4, pady=4)
+        self._layout_placeholder()
+
+        # === 卡片 3：状态 + 进度 + 开关 + 按钮 ===
+        ctrl = tk.Frame(R, bg=PANEL, highlightthickness=1, highlightbackground=LINE)
+        ctrl.pack(fill="x", padx=18, pady=6)
+
         self.status_var = tk.StringVar()
-        self.lbl_status = tk.Label(R, textvariable=self.status_var, font=FONT_UI,
-                                   bg=BG, fg="#495057", wraplength=640, justify="left")
-        self.lbl_status.pack(fill="x", padx=16)
-        bar_row = tk.Frame(R, bg=BG)
-        bar_row.pack(fill="x", padx=16, pady=(2, 0))
-        tk.Label(bar_row, text="靠近程度", font=FONT_SMALL, bg=BG, fg="#868e96").pack(side="left")
+        self.lbl_status = tk.Label(ctrl, textvariable=self.status_var, font=FONT_UI,
+                                   bg=PANEL, fg=TXT, wraplength=580, justify="left")
+        self.lbl_status.pack(fill="x", padx=12, pady=(8, 0))
+
+        bar_row = tk.Frame(ctrl, bg=PANEL)
+        bar_row.pack(fill="x", padx=12, pady=(4, 6))
+        tk.Label(bar_row, text="靠近程度", font=FONT_SMALL, bg=PANEL, fg=TXT_DIM).pack(side="left")
         style = ttk.Style()
         try:
-            style.theme_use("clam")
+            style.theme_use("clam")     # clam 才允许自定义进度条颜色
         except Exception:
             pass
-        style.configure("pink.Horizontal.TProgressbar", troughcolor="#ffe3ec",
-                        background="#ff8fab", thickness=10)
+        style.configure("whale.Horizontal.TProgressbar", troughcolor=PANEL_2,
+                        background=ACCENT, bordercolor=LINE,
+                        lightcolor=ACCENT_LT, darkcolor=ACCENT_DK, thickness=12)
         self.progress = ttk.Progressbar(bar_row, maximum=100, mode="determinate",
-                                        style="pink.Horizontal.TProgressbar")
+                                        style="whale.Horizontal.TProgressbar")
         self.progress.pack(side="left", fill="x", expand=True, padx=(8, 0))
 
-        # 滑块参数区
-        box = tk.LabelFrame(R, text=" ⚙ 参数调节 ", font=FONT_UI, bg=BG,
-                            fg="#d6336c", padx=10, pady=6)
-        box.pack(fill="x", padx=14, pady=8)
+        opt = tk.Frame(ctrl, bg=PANEL)
+        opt.pack(fill="x", padx=12)
+        self.var_popup = tk.BooleanVar(value=True)
+        self.var_float = tk.BooleanVar(value=True)
+        self.var_sound = tk.BooleanVar(value=True)
+        self.var_ball = tk.BooleanVar(value=True)
+        self.var_camidx = tk.IntVar(value=0)
+        for text, var in (("弹窗提醒", self.var_popup),
+                          ("角落悬浮字幕", self.var_float),
+                          ("提示音", self.var_sound),
+                          ("最小化时显示悬浮球", self.var_ball)):
+            tk.Checkbutton(opt, text=text, variable=var, font=FONT_UI, bg=PANEL,
+                           fg=TXT, activebackground=PANEL, activeforeground=ACCENT_LT,
+                           selectcolor=PANEL_2, highlightthickness=0, bd=0).pack(
+                               side="left", padx=(0, 10))
+        tk.Label(opt, text="设备编号", font=FONT_UI, bg=PANEL, fg=TXT).pack(side="left")
+        ttk.Spinbox(opt, from_=0, to=5, increment=1, width=4,
+                    textvariable=self.var_camidx, font=FONT_UI).pack(side="left", padx=(6, 0))
+
+        btns = tk.Frame(ctrl, bg=PANEL)
+        btns.pack(pady=8)
+        self.btn_start = tk.Button(btns, text="▶ 启动摄像头", font=FONT_BTN, bg=ACCENT,
+                                   fg="white", activebackground=ACCENT_DK,
+                                   activeforeground="white", relief="flat", padx=24,
+                                   pady=5, cursor="hand2", command=self.start_cam)
+        self.btn_start.pack(side="left", padx=8)
+        self.btn_stop = tk.Button(btns, text="■ 停止摄像头", font=FONT_BTN, bg=PANEL_2,
+                                  fg=TXT_DIM, activebackground=LINE,
+                                  activeforeground=TXT, relief="flat", padx=24,
+                                  pady=5, cursor="hand2", state="disabled",
+                                  command=self.stop_cam)
+        self.btn_stop.pack(side="left", padx=8)
+
+        # === 卡片 4：参数调节 ===
+        box = tk.LabelFrame(R, text=" ⚙ 参数调节 ", font=FONT_UI, bg=PANEL,
+                            fg=ACCENT_LT, padx=10, pady=6,
+                            highlightthickness=1, highlightbackground=LINE)
+        box.pack(fill="x", padx=18, pady=(2, 6))
 
         def add_scale(row, text, from_, to, res, init, fmt):
-            tk.Label(box, text=text, font=FONT_UI, bg=BG, fg="#495057") \
+            tk.Label(box, text=text, font=FONT_UI, bg=PANEL, fg=TXT) \
                 .grid(row=row, column=0, sticky="w", pady=2)
             s = tk.Scale(box, from_=from_, to=to, resolution=res, orient="horizontal",
-                         length=280, showvalue=False, bg=BG, highlightthickness=0,
-                         troughcolor="#ffd9e4", fg="#d6336c",
-                         activebackground="#ff8fab", sliderrelief="flat", bd=0)
+                         length=280, showvalue=False, bg=PANEL, highlightthickness=0,
+                         troughcolor=PANEL_2, fg=ACCENT_LT, bd=0,
+                         activebackground=ACCENT_LT, sliderrelief="flat")
             s.grid(row=row, column=1, pady=2)
-            val = tk.Label(box, text="", font=FONT_UI, bg=BG, fg="#d6336c",
-                           width=10, anchor="w")
+            val = tk.Label(box, text="", font=FONT_UI, bg=PANEL, fg=ACCENT_LT,
+                           width=9, anchor="w")
             val.grid(row=row, column=2, sticky="w")
 
             def _upd(v):
@@ -517,49 +778,75 @@ class FaceGuardApp:
                                  lambda v: "%d 级" % int(v))
         self.sc_cooldown = add_scale(2, "报警冷却秒数", 5, 120, 1, 30,
                                      lambda v: "%d 秒" % int(v))
-        tk.Label(box, text="阈值 = 人脸相对『正常坐姿基线』放大多少倍才触发；"
-                           "灵敏度 = 越高要求连续确认的帧数越少（响应越快也越容易误报）；"
-                           "冷却 = 两次报警的最小间隔，防止疯狂连报",
-                 font=FONT_SMALL, bg=BG, fg="#adb5bd", wraplength=620,
+        tk.Label(box, text="阈值 = 人脸相对『正常坐姿基线』放大多少倍就触发；"
+                           "灵敏度越高，需要连续确认的帧数越少；冷却 = 两次报警的最小间隔。",
+                 font=FONT_SMALL, bg=PANEL, fg=TXT_DIM, wraplength=560,
                  justify="left").grid(row=3, column=0, columnspan=3, sticky="w")
 
-        # 开关区
-        opt = tk.Frame(R, bg=BG)
-        opt.pack(fill="x", padx=18)
-        self.var_popup = tk.BooleanVar(value=True)
-        self.var_float = tk.BooleanVar(value=True)
-        self.var_sound = tk.BooleanVar(value=True)
-        self.var_camidx = tk.IntVar(value=0)
-        for text, var in (("弹窗提醒", self.var_popup),
-                          ("角落悬浮字幕", self.var_float),
-                          ("提示音", self.var_sound)):
-            tk.Checkbutton(opt, text=text, variable=var, font=FONT_UI, bg=BG,
-                           fg="#495057", activebackground=BG).pack(side="left", padx=(0, 14))
-        tk.Label(opt, text="设备编号", font=FONT_UI, bg=BG, fg="#495057").pack(side="left")
-        ttk.Spinbox(opt, from_=0, to=5, increment=1, width=4, textvariable=self.var_camidx,
-                    font=FONT_UI).pack(side="left", padx=(6, 0))
+        # === 底部隐私与悬浮球声明（直接压在渐变最深处，颜色刚好吻合）===
+        tk.Label(R, text="※ 100% 离线：无网络请求、无遥测，画面仅在内存中处理，关闭即消失。\n"
+                         "※ 悬浮球：最小化主窗口后出现在屏幕右下角，颜色越红 = 离屏幕越近"
+                         "（蓝=远 · 红=贴脸），拖可移动 · 双击回主窗口。",
+                 font=FONT_SMALL, bg=BG_DEEP, fg=TXT_DIM, justify="center",
+                 wraplength=600).pack(side="bottom", pady=(2, 8))
 
-        # 按钮区
-        btns = tk.Frame(R, bg=BG)
-        btns.pack(pady=10)
-        self.btn_start = tk.Button(btns, text="▶ 启动摄像头", font=FONT_BTN, bg="#ff8fab",
-                                   fg="white", activebackground="#ff6b9d",
-                                   activeforeground="white", relief="flat", padx=24,
-                                   pady=6, cursor="hand2", command=self.start_cam)
-        self.btn_start.pack(side="left", padx=8)
-        self.btn_stop = tk.Button(btns, text="■ 停止摄像头", font=FONT_BTN, bg="#ffd9e4",
-                                  fg="#b2506e", activebackground="#ffc2d4",
-                                  activeforeground="#b2506e", relief="flat", padx=24,
-                                  pady=6, cursor="hand2", state="disabled",
-                                  command=self.stop_cam)
-        self.btn_stop.pack(side="left", padx=8)
+        self.status_var.set("状态：待机中～ 点击【▶ 启动摄像头】开始守护 (っ˘ω˘ς)")
 
-        # 底部隐私声明
-        tk.Label(R, text="※ 本程序 100% 离线：无网络请求、无遥测、模型内置；"
-                         "画面仅在内存中实时处理，关闭即消失。",
-                 font=FONT_SMALL, bg=BG, fg="#adb5bd").pack(side="bottom", pady=(0, 8))
+    def _layout_placeholder(self):
+        """画/重画摄像头画布的待机画面：鲸鱼娘 + 提示文字（用 tag 统一显隐）。"""
+        cv = self.canvas
+        cv.delete("ph")
+        cv.delete("phdeco")
+        h = self.CANVAS_H
+        draw_whale_girl(cv, self.CANVAS_W // 2, h // 2 - 56, 112, mood="near", tag="phdeco")
+        cv.create_text(self.CANVAS_W // 2, h // 2 + 62,
+                       text="摄像头未启动\n点击下方【▶ 启动摄像头】\n"
+                            "鲸鱼娘会在这里陪你守护眼睛 (っ˘ω˘ς)",
+                       fill="#9dc4e6", font=FONT_UI, justify="center", tags=("ph",))
 
-        self.status_var.set("状态：待机中～ 点击【▶ 启动摄像头】开始守护 (ฅ'ω'ฅ)")
+    def _fit_to_screen(self):
+        """小屏 / 高 DPI 缩放时把摄像头画布收窄一点，保证所有控件都露得出来
+        （Tkinter 没有滚动条兜底，宁可画面小一点也不能让按钮跑到屏幕外）。"""
+        try:
+            self.root.update_idletasks()
+            need = self.root.winfo_reqheight()
+            avail = self.root.winfo_screenheight() - 90
+            if need > avail:
+                new_h = max(240, self.CANVAS_H - min(180, need - avail))
+                if new_h != self.CANVAS_H:
+                    self.CANVAS_H = new_h
+                    self.canvas.configure(height=new_h)
+                    self._layout_placeholder()
+                    self._show_placeholder(self.shared["frame"] is None)
+        except Exception:
+            pass
+
+    # ---------------- 背景渐变与装饰 ----------------
+
+    def _on_bg_resize(self, event):
+        """窗口尺寸变化时重画背景渐变（只在尺寸真的变了才画，避免抖动重绘）。"""
+        if (event.width, event.height) == self._bg_size:
+            return
+        self._bg_size = (event.width, event.height)
+        cv = self.bg_canvas
+        paint_gradient(cv, event.width, event.height, GRAD_TOP, GRAD_BOT, tag="grad")
+        cv.delete("deco")
+        # 深海泡泡：位置由固定种子生成，缩放窗口时不会乱跳
+        rnd = random.Random(20240707)
+        for _ in range(24):
+            x = rnd.uniform(0, max(1, event.width))
+            y = rnd.uniform(0, max(1, event.height))
+            rr = rnd.uniform(2, 9)
+            cv.create_oval(x - rr, y - rr, x + rr, y + rr, tags="deco",
+                           outline="#1d5f96", fill="")
+        # 右下角鲸鱼剪影（暗色，纯装饰）
+        try:
+            draw_whale_girl(cv, event.width - 70, event.height - 92, 124,
+                            mood="normal", body="#0a2b4a", hood="#092340",
+                            skin="#0d3459", tag="deco")
+        except Exception:
+            pass
+        cv.tag_raise("deco")
 
     # ---------------- 参数同步（主线程写，worker 读） ----------------
 
@@ -629,7 +916,9 @@ class FaceGuardApp:
         if self.root.state() != "iconic":
             self._draw_frame()
         self._update_status()
-        # 4) 下一拍
+        # 4) 悬浮球：主窗口最小化时出现，颜色随距离由蓝到红
+        self._sync_ball()
+        # 5) 下一拍
         self.root.after(self.TICK_MS, self._tick)
 
     def _draw_frame(self):
@@ -648,15 +937,17 @@ class FaceGuardApp:
         self._photo = ImageTk.PhotoImage(Image.fromarray(rgb))   # 保留引用防 GC
         if self._img_item is None:
             self._img_item = self.canvas.create_image(
-                self.CANVAS_W // 2, self.CANVAS_H // 2, image=self._photo)
+                self.CANVAS_W // 2, self.CANVAS_H // 2, image=self._photo, tags=("cam",))
         else:
+            self.canvas.coords(self._img_item, self.CANVAS_W // 2, self.CANVAS_H // 2)
             self.canvas.itemconfig(self._img_item, image=self._photo)
 
     def _show_placeholder(self, show):
-        if self._ph_item is not None:
-            self.canvas.itemconfig(self._ph_item, state="normal" if show else "hidden")
-        if self._img_item is not None:
-            self.canvas.itemconfig(self._img_item, state="hidden" if show else "normal")
+        """待机画面（鲸鱼娘 + 提示文字）与摄像头画面互斥显示。"""
+        state = "normal" if show else "hidden"
+        self.canvas.itemconfigure("ph", state=state)
+        self.canvas.itemconfigure("phdeco", state=state)
+        self.canvas.itemconfigure("cam", state="hidden" if show else "normal")
 
     def _update_status(self):
         with self.shared["lock"]:
@@ -666,7 +957,7 @@ class FaceGuardApp:
                 self.progress["value"] = 0
             return
         state = m.get("state", "noface")
-        txt, color = STATE_TEXT.get(state, ("……", "#495057"))
+        txt, color = STATE_TEXT.get(state, ("……", TXT))
         if state in ("noface", "far"):
             extra = ""
         else:
@@ -679,6 +970,245 @@ class FaceGuardApp:
         threshold = max(m.get("threshold", 1.25), 1e-6)
         self.progress["value"] = max(0.0, min(100.0, closeness / threshold * 100.0))
 
+    # ---------------- 悬浮球（最小化时显示：蓝 = 远，红 = 近） ----------------
+
+    def _distance_ratio(self):
+        """当前状态 → 0~1 的『贴近度』：0 = 离得远（球是蓝的），1 = 贴脸（球是红的）。"""
+        with self.shared["lock"]:
+            m = dict(self.shared["metrics"])
+        if not m:
+            return 0.0, "noface"
+        state = m.get("state", "noface")
+        if state in ("noface", "far"):
+            return 0.0, state
+        if state == "alert":
+            return 1.0, state
+        threshold = max(m.get("threshold", 1.25), 1e-6)
+        return max(0.0, min(1.0, m.get("closeness", 0.0) / threshold)), state
+
+    def _sync_ball(self):
+        """按"主窗口是否最小化"决定悬浮球的显示/隐藏，并刷新它的颜色。"""
+        try:
+            minimized = (self.root.state() == "iconic")
+        except Exception:
+            minimized = False
+        if minimized and bool(self.var_ball.get()):
+            self._show_ball()
+            self._update_ball()
+        else:
+            self._hide_ball()
+
+    def _show_ball(self):
+        if self._ball is not None and self._ball.winfo_exists():
+            return
+        b = tk.Toplevel(self.root)
+        b.overrideredirect(True)              # 无边框
+        b.attributes("-topmost", True)        # 置顶，写代码/看视频也看得见
+        transparent = try_transparent(b)      # 四角透出桌面（仅 Windows 生效）
+        bg = KEY_COLOR if transparent else BG_DEEP
+        b.configure(bg=bg)
+
+        cv = tk.Canvas(b, width=self.BALL_SIZE, height=self.BALL_SIZE,
+                       bg=bg, highlightthickness=0, bd=0)
+        cv.pack()
+        cv.configure(cursor="hand2")
+
+        # 位置：沿用上次拖动的位置，否则默认屏幕右下角（任务栏上方）
+        if self._ball_pos is None:
+            sw, sh = b.winfo_screenwidth(), b.winfo_screenheight()
+            self._ball_pos = (sw - self.BALL_SIZE - 36, sh - self.BALL_SIZE - 120)
+        b.geometry("+%d+%d" % self._ball_pos)
+
+        cv.bind("<Button-1>", self._ball_press)
+        cv.bind("<B1-Motion>", self._ball_drag_move)
+        cv.bind("<Double-Button-1>", lambda e: self._restore_window())
+        cv.bind("<Button-3>", self._ball_menu)
+        cv.bind("<Enter>", self._ball_tip_show)
+        cv.bind("<Leave>", self._ball_tip_hide)
+
+        self._ball, self._ball_canvas = b, cv
+        self._ball_key = None                 # 强制下一拍重画
+        self._draw_ball(distance_color(0.0), 0.0, "noface")
+
+    def _hide_ball(self):
+        self._ball_tip_hide()
+        if self._ball is not None and self._ball.winfo_exists():
+            self._ball.destroy()
+        self._ball = None
+        self._ball_canvas = None
+        self._ball_key = None
+
+    def _update_ball(self):
+        if self._ball is None or not self._ball.winfo_exists():
+            return
+        ratio, state = self._distance_ratio()
+        # 贴近度量化到 1/120 + 状态一起作为缓存键：数值几乎没变就不重画，省 CPU
+        key = (int(ratio * 120), state)
+        if key != self._ball_key:
+            self._ball_key = key
+            self._draw_ball(distance_color(ratio), ratio, state)
+        if self._ball_tip is not None and self._ball_tip.winfo_exists():
+            self._ball_tip_lbl.configure(text=self._ball_tip_text(ratio, state))
+
+    def _draw_ball(self, color, ratio, state):
+        """画悬浮球：一只随距离变色的鲸鱼娘。
+
+        球体主色 = 距离颜色（蓝 → 红）；越近颜色越红、外圈越亮、水花越大，
+        贴脸时表情变成 >_<，一眼就能从眼角余光看出自己是不是又凑上去了。
+        """
+        cv = self._ball_canvas
+        if cv is None:
+            return
+        cv.delete("all")
+        s = self.BALL_SIZE
+        cx = cy = s / 2.0
+        r = s / 2.0 - 8
+
+        # 外圈光晕：越近越亮（贴脸时像在发烫）
+        cv.create_oval(cx - r - 5, cy - r - 5, cx + r + 5, cy + r + 5,
+                       outline=shade(color, 0.55 + 0.55 * ratio), width=3)
+
+        # 头顶喷水：越近水珠越大
+        for k, dx in enumerate((-0.34, 0.0, 0.34)):
+            rr = 2.0 + 3.2 * ratio
+            px = cx + dx * r
+            py = cy - r * (1.40 if k == 1 else 1.22)
+            cv.create_oval(px - rr, py - rr * 1.5, px + rr, py + rr * 1.5,
+                           fill=shade("#cdefff", 0.85 + 0.2 * ratio), outline="")
+
+        # 两侧尾鳍
+        for sgn in (-1, 1):
+            cv.create_polygon(cx, cy - r * 0.60,
+                              cx + sgn * r * 0.98, cy - r * 1.18,
+                              cx + sgn * r * 1.02, cy - r * 0.84,
+                              cx + sgn * r * 0.20, cy - r * 0.84,
+                              fill=shade(color, 0.80), outline=shade(color, 1.3),
+                              smooth=True)
+
+        # 球体（= 鲸鱼娘的头，主色随距离变化）
+        cv.create_oval(cx - r, cy - r * 0.94, cx + r, cy + r * 0.94,
+                       fill=color, outline=shade(color, 1.35), width=2)
+        # 左上高光：圆球的立体感
+        cv.create_oval(cx - r * 0.66, cy - r * 0.74, cx - r * 0.10, cy - r * 0.22,
+                       fill=shade(color, 1.45), outline="")
+        # 下半浅色肚皮：一眼看出是鲸鱼而不是普通圆球
+        cv.create_arc(cx - r * 0.94, cy - r * 0.28, cx + r * 0.94, cy + r * 1.02,
+                      start=180, extent=180, style="chord",
+                      fill=shade(color, 1.30), outline="")
+
+        # 脸：眼睛 + 嘴 + 腮红
+        eye = "#102a44"
+        if state == "alert":
+            # >_< ：三点点折线画"用力闭眼"，比圆眼更符合"喷水警告"的表情
+            for sgn in (-1, 1):
+                cv.create_line(cx + sgn * r * 0.46, cy - r * 0.18,
+                               cx + sgn * r * 0.20, cy,
+                               cx + sgn * r * 0.46, cy + r * 0.18,
+                               fill=eye, width=3, capstyle="round", joinstyle="round")
+            cv.create_oval(cx - r * 0.17, cy + r * 0.18, cx + r * 0.17, cy + r * 0.46,
+                           fill="#7d2b3a", outline="")
+        else:
+            for sgn in (-1, 1):
+                cv.create_oval(cx + sgn * r * 0.44 - r * 0.15, cy - r * 0.16,
+                               cx + sgn * r * 0.44 + r * 0.15, cy + r * 0.16,
+                               fill=eye, outline="")
+                cv.create_oval(cx + sgn * r * 0.44 - r * 0.09, cy - r * 0.10,
+                               cx + sgn * r * 0.44 + r * 0.02, cy + r * 0.02,
+                               fill="#ffffff", outline="")
+            cv.create_arc(cx - r * 0.22, cy + r * 0.16, cx + r * 0.22, cy + r * 0.46,
+                          start=200, extent=140, style="arc",
+                          outline="#8c4a3a", width=2)
+        for sgn in (-1, 1):
+            cv.create_oval(cx + sgn * r * 0.78 - r * 0.20, cy + r * 0.16,
+                           cx + sgn * r * 0.78 + r * 0.20, cy + r * 0.38,
+                           fill=BLUSH, outline="")
+
+        # 中心读数：距离水平百分比（远 = 小，贴脸 = 100%）
+        cv.create_text(cx, cy + r * 0.74, text="%d%%" % round(ratio * 100),
+                       fill="#ffffff", font=FONT_TINY)
+
+    def _ball_tip_text(self, ratio, state):
+        if state == "alert":
+            mood = "喷水警告！快退后 (๑•̀ㅂ•́)و✧"
+        elif state in ("near", "cooldown"):
+            mood = "有点近了哦，鲸鱼娘在盯着你 (；・∀・)"
+        elif state == "noface":
+            mood = "还没看到你的脸 (っ˘ω˘ς)"
+        elif state == "far":
+            mood = "离得挺远，很乖～"
+        else:
+            mood = "距离很健康，继续保持！(๑˃ᴗ˂)ﻭ"
+        return ("鲸鱼娘悬浮球 ｜ 距离水平 %d%%\n%s\n拖动可移动 · 双击回到主窗口 · 右键更多"
+                % (round(ratio * 100), mood))
+
+    def _ball_tip_show(self, _event=None):
+        if self._ball is None or not self._ball.winfo_exists():
+            return
+        ratio, state = self._distance_ratio()
+        if self._ball_tip is None or not self._ball_tip.winfo_exists():
+            t = tk.Toplevel(self._ball)
+            t.overrideredirect(True)
+            t.attributes("-topmost", True)
+            bg = KEY_COLOR if try_transparent(t) else PANEL
+            t.configure(bg=bg)
+            lbl = tk.Label(t, text="", font=FONT_SMALL, bg=bg, fg=TXT,
+                           justify="left", padx=14, pady=10)
+            lbl.pack()
+            self._ball_tip, self._ball_tip_lbl = t, lbl
+        self._ball_tip_lbl.configure(text=self._ball_tip_text(ratio, state))
+        self._ball_tip.update_idletasks()
+        bx, by = self._ball.winfo_x(), self._ball.winfo_y()
+        tw, th = self._ball_tip.winfo_reqwidth(), self._ball_tip.winfo_reqheight()
+        x = max(0, min(bx + self.BALL_SIZE - tw, self._ball.winfo_screenwidth() - tw - 8))
+        y = by - th - 10
+        if y < 0:
+            y = by + self.BALL_SIZE + 10
+        self._ball_tip.geometry("+%d+%d" % (int(x), int(y)))
+
+    def _ball_tip_hide(self, _event=None):
+        if self._ball_tip is not None and self._ball_tip.winfo_exists():
+            self._ball_tip.destroy()
+        self._ball_tip = None
+        self._ball_tip_lbl = None
+
+    def _ball_press(self, event):
+        if self._ball is None:
+            return
+        self._ball_drag = (event.x_root - self._ball.winfo_x(),
+                           event.y_root - self._ball.winfo_y())
+
+    def _ball_drag_move(self, event):
+        if self._ball is None or self._ball_drag is None:
+            return
+        x = event.x_root - self._ball_drag[0]
+        y = event.y_root - self._ball_drag[1]
+        self._ball_pos = (x, y)
+        self._ball.geometry("+%d+%d" % (x, y))
+
+    def _ball_menu(self, event):
+        m = tk.Menu(self.root, tearoff=0, bg=PANEL, fg=TXT,
+                    activebackground=ACCENT, activeforeground="white", bd=0)
+        m.add_command(label="回到主窗口", command=self._restore_window)
+        if self._running:
+            m.add_command(label="暂停检测", command=self.stop_cam)
+        m.add_separator()
+        m.add_command(label="退出 FaceGuard", command=self._on_close)
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _restore_window(self):
+        """从悬浮球回到主窗口。"""
+        self._hide_ball()
+        try:
+            self.root.deiconify()
+            self.root.state("normal")
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
+
     # ---------------- 提醒：弹窗 / 悬浮字幕 / 提示音 ----------------
 
     def _on_alert(self, payload):
@@ -690,7 +1220,7 @@ class FaceGuardApp:
         self._play_sound()
 
     def _show_popup(self, kaomoji, body):
-        """二次元弹窗（非模态，自动 9 秒关闭；重复报警时复用同一个窗口刷新文案）。
+        """鲸鱼娘弹窗（非模态，自动 9 秒关闭；重复报警时复用同一个窗口刷新文案）。
         注意：故意不用 messagebox（模态会卡住主循环），也不用 transient
         （transient 窗口会随主窗口最小化而隐藏，违背"最小化仍要提醒"）。"""
         if self._popup is not None and self._popup.winfo_exists():
@@ -698,25 +1228,33 @@ class FaceGuardApp:
         else:
             pop = tk.Toplevel(self.root)
             pop.title("%s · 护眼提醒" % APP_NAME)
-            pop.configure(bg="#ffeef2")
+            pop.configure(bg=PANEL)
             pop.resizable(False, False)
             pop.attributes("-topmost", True)     # 置顶，玩游戏/写代码也看得见
-            inner = tk.Frame(pop, bg="#ffeef2", padx=26, pady=18)
-            inner.pack()
-            lbl_title = tk.Label(inner, text="", font=FONT_POP, fg="#e64980", bg="#ffeef2")
-            lbl_title.pack()
-            lbl_body = tk.Label(inner, text="", font=FONT_UI, fg="#8a4b60",
-                                bg="#ffeef2", justify="left")
-            lbl_body.pack(pady=(8, 12))
-            tk.Button(inner, text="知道啦～(๑•̀ㅂ•́)و✧", font=FONT_BTN, bg="#ff8fab",
-                      fg="white", activebackground="#ff6b9d", activeforeground="white",
-                      relief="flat", padx=16, pady=4, cursor="hand2",
-                      command=pop.destroy).pack()
+
+            # 顶部：蓝鲸渐变头图 + 鲸鱼娘 + 大字颜文字（全画在同一块 Canvas 上）
+            head = tk.Canvas(pop, width=470, height=104, bg=PANEL,
+                             highlightthickness=0, bd=0)
+            head.pack(fill="x")
+            paint_gradient(head, 470, 104, GRAD_TOP, PANEL, tag="pop_grad")
+            draw_whale_girl(head, 58, 56, 84, mood="alert")
+            title_id = head.create_text(112, 40, text="", anchor="w",
+                                        font=FONT_POP, fill=ACCENT_LT)
+            head.create_text(112, 72, text="鲸鱼娘 · 护眼提醒", anchor="w",
+                             font=FONT_SMALL, fill=TXT_DIM)
+
+            body_lbl = tk.Label(pop, text="", font=FONT_UI, fg=TXT, bg=PANEL,
+                                justify="left", padx=20, pady=14, wraplength=430)
+            body_lbl.pack(fill="x")
+            tk.Button(pop, text="知道啦～(๑•̀ㅂ•́)و✧", font=FONT_BTN, bg=ACCENT,
+                      fg="white", activebackground=ACCENT_DK, activeforeground="white",
+                      relief="flat", padx=16, pady=5, cursor="hand2",
+                      command=pop.destroy).pack(pady=(0, 16))
             self._popup = pop
-            self._popup_labels = (lbl_title, lbl_body)
-        lbl_title, lbl_body = self._popup_labels
-        lbl_title.configure(text=kaomoji)
-        lbl_body.configure(text=body)
+            self._popup_items = (head, title_id, body_lbl)
+        head, title_id, body_lbl = self._popup_items
+        head.itemconfigure(title_id, text=kaomoji)
+        body_lbl.configure(text=body)
         pop.update_idletasks()
         sw = pop.winfo_screenwidth()
         pop.geometry("+%d+140" % max(0, int((sw - pop.winfo_reqwidth()) / 2)))
@@ -733,18 +1271,38 @@ class FaceGuardApp:
         self._popup_after = None
 
     def _show_float(self, text):
-        """屏幕右上角悬浮字幕：无边框、置顶，6 秒后自动消失。"""
+        """屏幕右上角悬浮字幕：圆角胶囊 + 小鲸鱼娘，6 秒后自动消失。
+
+        圆角和四角透明都靠"色键透明"实现（仅 Windows 有效），
+        不支持时退化成深蓝方块背景，功能不受影响。
+        """
         if self._float is not None and self._float.winfo_exists():
             f = self._float
         else:
             f = tk.Toplevel(self.root)
             f.overrideredirect(True)             # 无边框
             f.attributes("-topmost", True)
-            self._float_lbl = tk.Label(f, text="", font=(_FONT, 13, "bold"),
-                                       fg="white", bg="#ff6b9d", padx=20, pady=10)
-            self._float_lbl.pack()
+            self._float_bg = KEY_COLOR if try_transparent(f) else PANEL
+            f.configure(bg=self._float_bg)
+            self._float_canvas = tk.Canvas(f, bg=self._float_bg,
+                                           highlightthickness=0, bd=0)
+            self._float_canvas.pack()
             self._float = f
-        self._float_lbl.configure(text=text)
+
+        cv = self._float_canvas
+        font = tkfont.Font(family=_FONT, size=13, weight="bold")
+        icon, pad = 40, 16
+        w = int(font.measure(text) + icon + pad * 3)
+        h = max(58, int(font.metrics("linespace") + pad * 2))
+        cv.configure(width=w, height=h)
+        cv.delete("all")
+        if self._float_bg != KEY_COLOR:          # 不能透明时铺一层深底兜底
+            cv.create_rectangle(0, 0, w, h, fill=PANEL, outline="")
+        round_rect(cv, 2, 2, w - 2, h - 2, h / 2.0,
+                   fill=PANEL_2, outline=ACCENT, width=2)
+        draw_whale_girl(cv, pad + icon / 2.0, h / 2.0, icon, mood="alert")
+        cv.create_text(pad + icon + pad * 0.5, h / 2.0, text=text, anchor="w",
+                       fill=TXT, font=font)
         f.update_idletasks()
         x = f.winfo_screenwidth() - f.winfo_reqwidth() - 24
         f.geometry("+%d+90" % max(0, int(x)))
@@ -779,6 +1337,7 @@ class FaceGuardApp:
 
     def _on_close(self):
         try:
+            self._hide_ball()
             if self.worker and self.worker.is_alive():
                 self.worker.stop()
                 self.worker.join(timeout=2.0)

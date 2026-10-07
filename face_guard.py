@@ -11,10 +11,16 @@
  【v2.0 蓝鲸版新增】
    * 主题换肤：整个软件背景改成深海蓝渐变（海面蓝 → 深海黑蓝），所有控件
      （面板 / 滑块 / 按钮 / 进度条 / 滚轮 / 弹窗）统一蓝调，彻底告别原来的粉色；
-   * 鲸鱼娘元素：纯 Canvas 图元矢量绘制的鲸鱼娘（鲸鱼兜帽 + 尾鳍 + 喷水 + 腮红），
-     出现在标题栏、摄像头待机画面、报警弹窗、悬浮字幕与悬浮球上，零图片素材；
    * 悬浮球：主窗口最小化后自动出现在桌面右下角，球体颜色随"距离水平"由蓝渐变到红
      （蓝 = 离得远，红 = 贴脸），并支持拖动、悬停看数值、双击回主窗口、右键菜单。
+
+ 【v2.1 立绘版新增】
+   * 鲸鱼娘立绘：改用抠好图的蓝发鲸鱼娘 PNG（assets/whale_girl.png 半身 +
+     assets/whale_girl_head.png 头部特写），替换原来纯 Canvas 画的鲸鱼娘；
+     抠图脚本用 OpenCV 洪水填充去背景 + 去白边羽化，见 README「立绘素材」一节；
+   * 悬浮球改成"圆形头像 + 距离色光环"：头像由立绘裁圆，光环颜色仍按
+     蓝→红表示远近，并叠一层同色薄雾，颜色信号一眼可辨；
+   * 立绘缺失/损坏时，界面自动退回原来的 Canvas 矢量鲸鱼娘，不会开天窗。
 
  【隐私承诺（硬性要求）】
    * 全程离线：代码中没有任何网络请求，运行时绝不联网下载模型/上传数据；
@@ -25,8 +31,10 @@
    * GUI      : Tkinter —— Python 标准库，零额外依赖，PyInstaller 打包体积最小；
    * 人脸检测 : OpenCV 自带 Haar 级联 —— 比 MTCNN 轻量几个数量级（模型 <1MB），
                 CPU 单线程即可 30FPS 实时，且 XML 直接内置在 opencv 包里可随包打包；
-   * 显示辅助 : Pillow —— 仅用于把 OpenCV 帧高效刷到 Tkinter 画布（不走 PNG 编码）；
-   * 美术素材 : 全部用 Canvas 图元现画，零外部图片、打包体积零增长。
+   * 显示辅助 : Pillow —— 把 OpenCV 帧高效刷到 Tkinter 画布，并负责立绘缩放、
+                圆形头像蒙版与颜色薄雾；
+   * 美术素材 : 鲸鱼娘立绘是从截图抠出来的透明 PNG（打包进 EXE）；
+                未提供立绘时退回 Canvas 图元现画，零素材也能跑。
 
  【运行】   python face_guard.py
  【打包】   双击 build.bat（或 python -m PyInstaller --noconfirm --clean FaceGuard.spec）
@@ -46,7 +54,7 @@ import traceback
 # ---------------- 第三方依赖（pip install opencv-python-headless pillow） ----------------
 import cv2
 import numpy as np                 # OpenCV 依赖，显式引入便于阅读
-from PIL import Image, ImageTk     # 仅用于界面显示，不参与任何算法
+from PIL import Image, ImageTk, ImageChops, ImageDraw   # 界面显示 / 立绘缩放与圆形蒙版
 
 IS_WINDOWS = (platform.system() == "Windows")
 
@@ -69,10 +77,15 @@ from tkinter import ttk, messagebox
 # ================================ 常量与文案 ================================
 
 APP_NAME = "FaceGuard 酱 · 鲸鱼娘"
-APP_VERSION = "v2.0"
+APP_VERSION = "v2.1"
 
 # 内置人脸检测模型文件名（打包时用 --add-data 塞进 EXE，见 build.bat）
 CASCADE_FILENAME = "haarcascade_frontalface_default.xml"
+
+# ---------------- 鲸鱼娘立绘素材（从截图抠图得到，打包时 --add-data "assets;assets"） ----------------
+ASSET_DIRNAME = "assets"
+MASCOT_FULL   = "whale_girl.png"        # 半身立绘：待机画面等大尺寸场合
+MASCOT_HEAD   = "whale_girl_head.png"   # 头部方形特写：图标/悬浮字幕/悬浮球等小尺寸场合
 
 # ---------------- 蓝鲸主题配色（整个软件的背景/控件都从这里取色） ----------------
 BG_DEEP    = "#04121f"   # 窗口最底色 / 渐变末端（深海）
@@ -346,6 +359,82 @@ def draw_whale_girl(canvas, cx, cy, size, mood="normal",
                                        start=200, extent=140, style="arc",
                                        outline="#a8543f", width=2, tags=tags))
     return items
+
+
+# ---------------- 立绘素材加载（打包后用 sys._MEIPASS，缺失时程序自动退回矢量画法） ----------------
+
+def asset_path(name):
+    """定位 assets 目录下的素材文件。
+    1. PyInstaller --onefile 打包后：--add-data "assets;assets" 把整个目录解包到 sys._MEIPASS
+    2. 开发环境：脚本同目录的 assets/
+    找不到返回 None（调用方会退回 Canvas 矢量鲸鱼娘，绝不报错崩界面）。
+    """
+    if getattr(sys, "frozen", False):
+        cand = os.path.join(sys._MEIPASS, ASSET_DIRNAME, name)
+        if os.path.exists(cand):
+            return cand
+    cand = os.path.join(app_dir(), ASSET_DIRNAME, name)
+    if os.path.exists(cand):
+        return cand
+    return None
+
+
+_MASCOT_CACHE = {}
+
+
+def mascot_image(name, height=None):
+    """读取立绘并等比缩放到指定高度（LANCZOS 保住小尺寸下的五官清晰度）。
+    按 (路径, 高度) 缓存已解码的 PIL 图：一次报警可能同时用到多个尺寸，
+    不缓存就会反复读文件 + 反复重采样。
+    """
+    path = asset_path(name)
+    if path is None:
+        return None
+    key = (path, height)
+    if key in _MASCOT_CACHE:
+        return _MASCOT_CACHE[key]
+    try:
+        im = Image.open(path).convert("RGBA")
+    except Exception:
+        return None
+    if height:
+        h = max(1, int(height))
+        w = max(1, int(round(im.width * h / float(im.height))))
+        im = im.resize((w, h), Image.LANCZOS)
+    _MASCOT_CACHE[key] = im
+    return im
+
+
+def circular_avatar(im, size, wash=None, wash_alpha=0.0):
+    """把 RGBA 立绘裁成圆形头像（悬浮球用），可选叠一层颜色薄雾。
+
+    圆形蒙版按 4 倍超采样再缩回来，边缘才不会有锯齿；
+    wash 是叠上去的颜色（悬浮球传距离色），用来在不遮住脸的前提下加强颜色信号。
+    """
+    if im is None:
+        return None
+    size = max(8, int(size))
+    scale = max(size / float(im.width), size / float(im.height))
+    big = im.resize((max(1, int(round(im.width * scale))),
+                     max(1, int(round(im.height * scale)))), Image.LANCZOS)
+    left = (big.width - size) // 2
+    top = (big.height - size) // 3        # 略微上移：脸比几何中心稍高一点更好看
+    big = big.crop((max(0, left), max(0, top), max(0, left) + size, max(0, top) + size))
+
+    s4 = size * 4
+    mask = Image.new("L", (s4, s4), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, s4 - 1, s4 - 1), fill=255)
+    mask = mask.resize((size, size), Image.LANCZOS)
+    big.putalpha(ImageChops.multiply(big.getchannel("A"), mask))
+
+    if wash and wash_alpha > 0.01:
+        # 薄雾只铺在头像的可见像素上：layer 的 alpha = 雾浓度 × 头像 alpha，
+        # 再做 alpha_composite 正常混合（不能直接 multiply，那会把颜色乘暗）
+        layer = Image.new("RGBA", (size, size), wash + (255,))
+        layer.putalpha(ImageChops.multiply(layer.getchannel("A"), big.getchannel("A")))
+        layer.putalpha(layer.getchannel("A").point(lambda v: int(v * min(1.0, wash_alpha))))
+        big = Image.alpha_composite(big, layer)
+    return big
 
 
 # ================================ 靠近判定引擎 ================================
@@ -637,6 +726,10 @@ class FaceGuardApp:
         self._photo = None
         self._img_item = None
 
+        # ---- 立绘 PhotoImage 缓存（Tk 图必须留引用，否则被 GC 掉会变成白图）----
+        self._mascot_photos = {}
+        self._ball_avatar = None
+
         # ---- 悬浮球状态（最小化时显示，颜色随距离由蓝到红）----
         self._ball = None
         self._ball_canvas = None
@@ -672,7 +765,7 @@ class FaceGuardApp:
         head.pack(fill="x", padx=18, pady=(14, 6))
         icon = tk.Canvas(head, width=58, height=58, bg=PANEL, highlightthickness=0, bd=0)
         icon.pack(side="left", padx=(10, 6), pady=5)
-        draw_whale_girl(icon, 29, 32, 42, mood="normal")
+        self._put_mascot(icon, MASCOT_HEAD, 29, 29, 50, fallback=42, mood="normal")
         tbox = tk.Frame(head, bg=PANEL)
         tbox.pack(side="left", pady=5)
         tk.Label(tbox, text="FaceGuard 酱 · 鲸鱼娘", font=FONT_TITLE,
@@ -792,14 +885,40 @@ class FaceGuardApp:
 
         self.status_var.set("状态：待机中～ 点击【▶ 启动摄像头】开始守护 (っ˘ω˘ς)")
 
+    # ---------------- 立绘摆放（素材缺失自动退回矢量画法） ----------------
+
+    def _mascot_photo(self, name, height):
+        """按 (素材名, 高度) 缓存 Tk PhotoImage。"""
+        key = (name, int(height))
+        if key not in self._mascot_photos:
+            im = mascot_image(name, height=height)
+            self._mascot_photos[key] = ImageTk.PhotoImage(im) if im is not None else None
+        return self._mascot_photos[key]
+
+    def _put_mascot(self, canvas, name, cx, cy, height, fallback=None,
+                    mood="normal", tag=None):
+        """把立绘放到 canvas 的 (cx, cy)（等比缩放到 height 像素高）。
+
+        立绘是抠好图带透明通道的 PNG，直接 create_image 就能贴到画布上。
+        素材丢失/损坏时退回 draw_whale_girl 的矢量鲸鱼娘，界面不会开天窗。
+        """
+        photo = self._mascot_photo(name, height)
+        if photo is not None:
+            return canvas.create_image(cx, cy, image=photo,
+                                       tags=() if tag is None else (tag,))
+        if fallback:
+            draw_whale_girl(canvas, cx, cy, fallback, mood=mood, tag=tag)
+        return None
+
     def _layout_placeholder(self):
-        """画/重画摄像头画布的待机画面：鲸鱼娘 + 提示文字（用 tag 统一显隐）。"""
+        """画/重画摄像头画布的待机画面：鲸鱼娘立绘 + 提示文字（用 tag 统一显隐）。"""
         cv = self.canvas
         cv.delete("ph")
         cv.delete("phdeco")
         h = self.CANVAS_H
-        draw_whale_girl(cv, self.CANVAS_W // 2, h // 2 - 56, 112, mood="near", tag="phdeco")
-        cv.create_text(self.CANVAS_W // 2, h // 2 + 62,
+        self._put_mascot(cv, MASCOT_FULL, self.CANVAS_W // 2, h // 2 - 34, 168,
+                         fallback=112, mood="near", tag="phdeco")
+        cv.create_text(self.CANVAS_W // 2, h // 2 + 74,
                        text="摄像头未启动\n点击下方【▶ 启动摄像头】\n"
                             "鲸鱼娘会在这里陪你守护眼睛 (っ˘ω˘ς)",
                        fill="#9dc4e6", font=FONT_UI, justify="center", tags=("ph",))
@@ -1037,6 +1156,7 @@ class FaceGuardApp:
         self._ball = None
         self._ball_canvas = None
         self._ball_key = None
+        self._ball_avatar = None
 
     def _update_ball(self):
         if self._ball is None or not self._ball.winfo_exists():
@@ -1051,15 +1171,56 @@ class FaceGuardApp:
             self._ball_tip_lbl.configure(text=self._ball_tip_text(ratio, state))
 
     def _draw_ball(self, color, ratio, state):
-        """画悬浮球：一只随距离变色的鲸鱼娘。
+        """画悬浮球：抠好的鲸鱼娘立绘裁成圆形头像，外面套一圈"距离色"光环。
 
-        球体主色 = 距离颜色（蓝 → 红）；越近颜色越红、外圈越亮、水花越大，
-        贴脸时表情变成 >_<，一眼就能从眼角余光看出自己是不是又凑上去了。
+        颜色语义与矢量版一致：蓝 = 离得远，红 = 贴脸；越近光环越亮，
+        头像上再叠一层同色薄雾（不遮住五官，只是整体泛红），余光一瞥就知道自己又凑上去了。
+        立绘素材缺失时自动退回矢量鲸鱼娘（_draw_ball_vector）。
         """
         cv = self._ball_canvas
         if cv is None:
             return
         cv.delete("all")
+        s = self.BALL_SIZE
+        cx = cy = s / 2.0
+        r = s / 2.0 - 8
+
+        avatar = None
+        try:
+            head = mascot_image(MASCOT_HEAD)
+            if head is not None:
+                size = int(2 * (r - 4))
+                avatar = ImageTk.PhotoImage(circular_avatar(
+                    head, size, wash=hex_to_rgb(color), wash_alpha=0.08 + 0.26 * ratio))
+        except Exception:
+            avatar = None
+        if avatar is None:
+            self._draw_ball_vector(cv, color, ratio, state)
+            return
+        self._ball_avatar = avatar          # 留引用：Tk 图被 GC 掉会变白图
+
+        # 外发光 + 距离色光环 + 内侧高光：越近越亮
+        cv.create_oval(cx - r - 5, cy - r - 5, cx + r + 5, cy + r + 5,
+                       outline=shade(color, 0.50 + 0.60 * ratio), width=3)
+        cv.create_oval(cx - r, cy - r, cx + r, cy + r,
+                       outline=shade(color, 0.78), width=8)
+        cv.create_oval(cx - r + 3, cy - r + 3, cx + r - 3, cy + r - 3,
+                       outline=shade(color, 1.35), width=2)
+        cv.create_image(cx, cy, image=avatar)
+
+        # 底部读数：距离水平百分比（远 = 小，贴脸 = 100%）
+        ty = cy + r - 10
+        round_rect(cv, cx - 23, ty - 9, cx + 23, ty + 9, 9,
+                   fill="#04121f", outline=shade(color, 1.2), width=1)
+        cv.create_text(cx, ty, text="%d%%" % round(ratio * 100),
+                       fill="#ffffff", font=FONT_TINY)
+
+    def _draw_ball_vector(self, cv, color, ratio, state):
+        """矢量版悬浮球（立绘素材不可用时的兜底）：一只随距离变色的鲸鱼娘。
+
+        球体主色 = 距离颜色（蓝 → 红）；越近颜色越红、外圈越亮、水花越大，
+        贴脸时表情变成 >_<。
+        """
         s = self.BALL_SIZE
         cx = cy = s / 2.0
         r = s / 2.0 - 8
@@ -1237,7 +1398,7 @@ class FaceGuardApp:
                              highlightthickness=0, bd=0)
             head.pack(fill="x")
             paint_gradient(head, 470, 104, GRAD_TOP, PANEL, tag="pop_grad")
-            draw_whale_girl(head, 58, 56, 84, mood="alert")
+            self._put_mascot(head, MASCOT_HEAD, 58, 54, 88, fallback=84, mood="alert")
             title_id = head.create_text(112, 40, text="", anchor="w",
                                         font=FONT_POP, fill=ACCENT_LT)
             head.create_text(112, 72, text="鲸鱼娘 · 护眼提醒", anchor="w",
@@ -1300,7 +1461,8 @@ class FaceGuardApp:
             cv.create_rectangle(0, 0, w, h, fill=PANEL, outline="")
         round_rect(cv, 2, 2, w - 2, h - 2, h / 2.0,
                    fill=PANEL_2, outline=ACCENT, width=2)
-        draw_whale_girl(cv, pad + icon / 2.0, h / 2.0, icon, mood="alert")
+        self._put_mascot(cv, MASCOT_HEAD, pad + icon / 2.0, h / 2.0, icon,
+                         fallback=icon, mood="alert")
         cv.create_text(pad + icon + pad * 0.5, h / 2.0, text=text, anchor="w",
                        fill=TXT, font=font)
         f.update_idletasks()

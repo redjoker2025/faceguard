@@ -192,6 +192,10 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name FaceGuard 
 `assets/` 下两张透明 PNG 是从一张立绘截图上抠出来的，抠图脚本已入库：
 `tools/make_mascot.py`（输入 `artwork/whale_girl_source.png`，输出两张 PNG + `.scratch/` 验证图）。
 
+小尺寸图标（标题栏 / 悬浮字幕 / 悬浮球）用的是按脸裁的方形特写，缩到 40px 五官依然清楚：
+
+![头部特写](docs/mascot-head.png)
+
 ```bat
 python tools/make_mascot.py
 ```
